@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import sys, socket, select, time, json, random
+import sys, socket, select, time, json, random, math
 
 # Your ID number
 my_id = sys.argv[1]
@@ -8,35 +8,160 @@ my_id = sys.argv[1]
 # The ID numbers of all the other replicas
 replica_ids = sys.argv[2:]
 
+# number of replicas that constitutes a quorom
+quorum_size = int(math.ceil((len(replica_ids) + 1) / 2.0))
+
+# A State is one of:
+FOLLOWER = "FOLLOWER"
+LEADER = "LEADER"
+CANDIDATE = "CANDIDATE"
+
+# Current state of the replica
+my_state = FOLLOWER
+
+# ID number of the leader
+leader_id = 'FFFF'
+
+# ID of replica voted as leader
+voted_for = None
+
+# count of votes received
+vote_count = 0
+
+# Random timeout before electing self as leader, in seconds
+leader_timeout = random.randint(150, 300) / 1000.0
+
+# key-value store for the leader
+store = {}
+
+# Message Types:
+GET = 'get'
+PUT = 'put'
+REQUEST_VOTE = 'request_vote'
+SEND_VOTE = 'send_vote'
+APPEND_ENTRIES = 'append_entries'
+FAIL = 'fail'
+OK = 'ok'
+REDIRECT = 'redirect'
+
 # Connect to the network. All messages to/from other replicas and clients will
 # occur over this socket
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
-last = 0
+# last time a message from the leader was received
+last_leader_msg = time.time()
+
+# random timeout, who is leader, send election requests & votes, receive votes, state, dictionary of values
+
+
+
+def send(msg):
+    sock.send(json.dumps(msg))
+
+
+def get(msg):
+    get_source = msg['src']
+    get_mid = msg.get('MID', None)
+    reply = {'src': my_id, 'dst': get_source, 'leader': leader_id}
+    if get_mid:
+        reply['MID'] = get_mid
+    if my_state == LEADER:
+        key = msg['key']
+        val = store.get(key, None)
+        if val:
+            reply['type'] = OK
+            reply['value'] = val
+        else:
+            reply['type'] = FAIL
+    else:
+        reply['type'] = REDIRECT
+    send(reply)
+
+
+def put(msg):
+    put_source = msg['src']
+    put_mid = msg.get('MID', None)
+    reply = {'src': my_id, 'dst': put_source, 'leader': leader_id}
+    if put_mid:
+        reply['MID'] = put_mid
+    if my_state == LEADER:
+        key = msg['key']
+        val = msg['value']
+        store[key] = val
+        reply['type'] = OK
+    else:
+        reply['type'] = REDIRECT
+    send(reply)
+
+
+def send_vote(msg):
+    global voted_for
+    if voted_for is None:
+        candidate_id = msg['src']
+        voted_for = candidate_id
+        print my_id, 'has voted for', candidate_id
+        reply = {'src': my_id, 'dst': candidate_id, 'leader': leader_id, 'type':SEND_VOTE }
+        send(reply)
+    else:
+        raise Exception('Multiple leader error. Our leader: %s, requested vote: %s', leader_id, msg['src'])
+
+
+def accept_vote(msg):
+    global vote_count, my_state, leader_id
+    vote_count += 1
+    print my_id, 'received vote from', msg['src'], vote_count
+    if vote_count >= quorum_size:
+        print my_id, 'has won the vote'
+        my_state = LEADER
+        leader_id = my_id
+        election_over_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'type': APPEND_ENTRIES }
+        send(election_over_msg)
+
+
+def append_entries(msg):
+    global leader_id, leader_timeout, voted_for
+    msg_leader = msg['leader']
+    if msg_leader != leader_id:
+        print my_id, 'has accepted leader:', msg_leader
+        leader_timeout = 'inf'
+        leader_id = msg_leader
+        voted_for = None
+
+
+def conduct_election():
+    global leader_id, my_state, vote_count
+    print my_id, 'has started an election'
+
+    my_state = CANDIDATE
+    vote_count = 1
+    request_vote_msg = { 'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'type': REQUEST_VOTE }
+    send(request_vote_msg)
+
 
 while True:
-	ready = select.select([sock], [], [], 0.1)[0]
-	
-	if sock in ready:
-		msg_raw = sock.recv(32768)
-		
-		if len(msg_raw) == 0: continue
-		msg = json.loads(msg_raw)
-		
-		# For now, ignore get() and put() from clients
-		if msg['type'] in ['get', 'put']:
-                        pass
-		
-		# Handle noop messages. This may be removed from your final implementation
-		elif msg['type'] == 'noop':
-			print '%s received a NOOP from %s' % (msg['dst'], msg['src'])
-		
-	clock = time.time()
-	if clock-last > 2:
-		# Send a no-op message to a random peer every two seconds, just for fun
-		# You definitely want to remove this from your implementation
-		msg = {'src': my_id, 'dst': random.choice(replica_ids), 'leader': 'FFFF', 'type': 'noop'}
-		sock.send(json.dumps(msg))
-		print '%s sending a NOOP to %s' % (msg['src'], msg['dst'])
-		last = clock
+    ready = select.select([sock], [], [], 0.1)[0]
+
+    if sock in ready:
+        msg_raw = sock.recv(32768)
+
+        if len(msg_raw) == 0: continue
+        msg = json.loads(msg_raw)
+
+        if msg['type'] == GET:
+            get(msg)
+        if msg['type'] == PUT:
+            put(msg)
+        if msg['type'] == REQUEST_VOTE:
+            send_vote(msg)
+        if msg['type'] == SEND_VOTE and my_state == CANDIDATE:
+            accept_vote(msg)
+        if msg['type'] == APPEND_ENTRIES:
+            append_entries(msg)
+
+
+    clock = time.time()
+    if clock - last_leader_msg > leader_timeout:
+        # trigger leader elections if a follower
+        if my_state == FOLLOWER and voted_for is None:
+            conduct_election()

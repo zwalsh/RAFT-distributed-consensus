@@ -1,0 +1,4 @@
+#!/bin/bash
+./run.py simple-1.json
+./run.py simple-2.json
+./run.py crash-1.json
