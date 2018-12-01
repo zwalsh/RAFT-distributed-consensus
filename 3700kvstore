@@ -20,14 +20,14 @@ CANDIDATE = "CANDIDATE"
 my_state = FOLLOWER
 
 # ID number of the leader
-leader_id = 'FFFF'
+leader_id = '0000'
 
 # ID of replica voted as leader in this term - only for outstanding elections,
 # will be None otherwise
 voted_for = None
 
 # current term number
-term = 0
+term = 1
 
 # count of votes received
 vote_count = 0
@@ -41,12 +41,12 @@ def pick_random_timeout():
 
 pick_random_timeout()
 
+
 # key-value store for the leader
 store = {}
 # log entries; contains (command for machine, term, client id)
 # also, first index is apparently supposed to be 1
-# command for mahine: ['GET', 123]
-log = [[[1], 1, 1]]
+# command for machine: ['GET', 123]
 log = [{
     "command": {
         "type": 1,
@@ -71,6 +71,7 @@ PUT = 'put'
 REQUEST_VOTE = 'request_vote'
 SEND_VOTE = 'send_vote'
 APPEND_ENTRIES = 'append_entries'
+AE_REPLY = 'ae_reply'
 FAIL = 'fail'
 OK = 'ok'
 REDIRECT = 'redirect'
@@ -84,24 +85,15 @@ sock.connect(my_id)
 last_leader_msg = time.clock()
 
 
+
 def send(msg):
     sock.send(json.dumps(msg))
-
 
 def get(msg):
     get_source = msg['src']
     get_mid = msg.get('MID', None)
-    reply = {'src': my_id, 'dst': get_source, 'leader': leader_id}
-    if get_mid:
-        reply['MID'] = get_mid
     if my_state == LEADER:
         key = msg['key']
-        val = store.get(key, None)
-        if val:
-            reply['type'] = OK
-            reply['value'] = val
-        else:
-            reply['type'] = FAIL
 
         command = {
             "type": GET,
@@ -110,27 +102,28 @@ def get(msg):
         entry = {
             "command": command,
             "term": term,
-            "client_id", get_source,
+            "client_id": get_source,
         }
+        if get_mid:
+            entry["MID"] = get_mid
+
         log.append(entry)
-        print log
+        send_append_entries()
     else:
+        reply = {'src': my_id, 'dst': get_source, 'leader': leader_id}
+        if get_mid:
+            reply['MID'] = get_mid
         reply['type'] = REDIRECT
-    send(reply)
+        send(reply)
 
 def put(msg):
     global log
 
     put_source = msg['src']
     put_mid = msg.get('MID', None)
-    reply = {'src': my_id, 'dst': put_source, 'leader': leader_id}
-    if put_mid:
-        reply['MID'] = put_mid
     if my_state == LEADER:
         key = msg['key']
         val = msg['value']
-        store[key] = val
-        reply['type'] = OK
 
         command = {
             "type": PUT,
@@ -140,14 +133,20 @@ def put(msg):
         entry = {
             "command": command,
             "term": term,
-            "client_id", put_source,
+            "client_id": put_source,
         }
-        log.append(entry)
-        print log
-    else:
-        reply['type'] = REDIRECT
-    send(reply)
 
+        if put_mid:
+            entry["MID"] = put_mid
+
+        log.append(entry)
+        send_append_entries()
+    else:
+        reply = {'src': my_id, 'dst': put_source, 'leader': leader_id}
+        if put_mid:
+            reply['MID'] = put_mid
+        reply['type'] = REDIRECT
+        send(reply)
 
 def send_vote(msg):
     global voted_for, term, my_state, last_leader_msg
@@ -180,9 +179,8 @@ def send_vote(msg):
         reply['term'] = term
         send(reply)
 
-
 def accept_vote(msg):
-    global vote_count, my_state, leader_id
+    global vote_count
     granted = msg['granted']
 
     if granted:
@@ -190,28 +188,166 @@ def accept_vote(msg):
         print my_id, 'received vote from', msg['src'], vote_count, ' in term ', term
     if vote_count >= quorum_size:
         print my_id, 'has won the vote - term: ', term
-        my_state = LEADER
-        leader_id = my_id
-        election_over_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
-        send(election_over_msg)
+        become_leader()
+        send_append_entries()
 
 
-def append_entries(msg):
-    global leader_id, last_leader_msg, leader_timeout, voted_for, term, my_state
+def become_leader():
+    global my_state, leader_id, next_index, match_index
+    my_state = LEADER
+    leader_id = my_id
+
+    next_index = {}
+    match_index = {}
+    for server_id in replica_ids:
+        next_index[server_id] = len(log)
+        match_index[server_id] = 0
+
+should_print = False
+
+def send_append_entries():
+    global next_index, should_print
+    # per every follower, send append-entries method with ones that they don't have
+    for server_id in next_index.keys():
+        next_log_entry = next_index[server_id]
+        logs_to_send = log[next_log_entry:next_log_entry + 100]
+        prev_entry = log[next_log_entry - 1]
+
+        msg = {'src': my_id, 'dst': server_id, 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES,
+               'logs': logs_to_send, 'prev_log_idx': next_log_entry - 1, 'prev_log_term': prev_entry['term'],
+               'leader_commit': commit_index}
+        if len(logs_to_send) > 10:
+            should_print = True
+            print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
+            print next_index
+        send(msg)
+
+
+def recv_append_entries_reply(msg):
+    global match_index, next_index
+    follower_id = msg['src']
+    succeeded = msg['response']
+
+    if succeeded:
+        follower_index = msg['current_index']
+        if should_print:
+            print 'Updating next for', follower_id, 'to', follower_index + 1
+        next_index[follower_id] = follower_index + 1
+        match_index[follower_id] = follower_index
+    else:
+        print follower_id, 'failed to receive'
+        next_index[follower_id] -= 1
+
+    sorted_matching_indices = sorted(match_index.values())
+    quorum_commit = sorted_matching_indices[2]
+    commit_entry = log[quorum_commit]
+    if commit_entry['term'] == term and quorum_commit > commit_index:
+        update_commit_idx(quorum_commit)
+
+
+def append_new_entries(new_entries, prev_log_idx):
+    global log
+    for i in range(0, len(new_entries)):
+        new_entry = new_entries[i]
+        log_idx = prev_log_idx + i + 1
+        if log_idx >= len(log):
+            log += new_entries[i:]
+            print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
+            break
+        log_entry = log[log_idx]
+
+        if new_entry['term'] != log_entry['term']:
+            del log[log_idx:]
+            log += new_entries[i:]
+            print my_id, 'deleted all from', log_idx, 'on, appended', len(new_entries), 'onto log', len(log)
+            break
+
+def update_commit_idx(leader_commit):
+    global commit_index, last_applied
+    if leader_commit > commit_index:
+        commit_index = min(leader_commit, len(log) - 1)
+    while last_applied < commit_index:
+        last_applied += 1
+        apply_command(last_applied)
+
+
+def apply_command(log_index):
+    entry = log[log_index]
+    command = entry['command']
+    command_type = command['type']
+    key = command['key']
+
+    if command_type == GET and my_state == LEADER:
+        val = store.get(key, None)
+        reply = { 'src': my_id, 'dst': entry['client_id'], 'leader': leader_id }
+        mid = entry.get('MID', None)
+        if mid:
+            reply['MID'] = mid
+        if val:
+            reply['type'] = OK
+            reply['value'] = val
+        else:
+            reply['type'] = FAIL
+        send(reply)
+    elif command_type == PUT:
+        val = command['val']
+        store[key] = val
+        if my_state == LEADER:
+            reply = {'src': my_id, 'dst': entry['client_id'], 'leader': leader_id}
+            mid = entry.get('MID', None)
+            if mid:
+                reply['MID'] = mid
+            reply['type'] = OK
+            send(reply)
+
+
+def recv_append_entries(msg):
+    global leader_id, last_leader_msg, leader_timeout, voted_for, term, my_state, commit_index
     msg_leader = msg['leader']
     recv_term = msg['term']
 
+    if should_print:
+        print my_id, 'received AE', msg
+
+
+    reply = {'src': my_id, 'dst': msg['src'], 'type': AE_REPLY, 'leader': leader_id }
+
     if recv_term >= term:
         term = recv_term
+        reply['term'] = term
         my_state = FOLLOWER
         last_leader_msg = time.clock()
-        # later update log here
+
+        prev_log_idx = msg['prev_log_idx']
+        prev_log_term = msg['prev_log_term']
+
+        my_prev_log_term = log[prev_log_idx]['term']
+
+        if my_prev_log_term != prev_log_term:
+            print my_id, 'failed because wrong previous entry'
+            print my_prev_log_term, prev_log_term
+            reply['response'] = False
+            send(reply)
+
+        new_entries = msg['logs']
+        append_new_entries(new_entries, prev_log_idx)
+        update_commit_idx(msg['leader_commit'])
+
+        reply['response'] = True
+        reply['current_index'] = len(log) - 1
+        print my_id, 'replying to AE', reply
+        send(reply)
 
         if msg_leader != leader_id:
             print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.clock()
             leader_id = msg_leader
             pick_random_timeout()
             voted_for = None
+    else:
+        reply['term'] = term
+        reply['response'] = False
+        print my_id, 'failed because wrong term'
+        return
 
 
 def conduct_election():
@@ -226,6 +362,10 @@ def conduct_election():
     request_vote_msg = { 'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': REQUEST_VOTE }
     send(request_vote_msg)
 
+
+
+if my_id == '0000':
+    become_leader()
 
 while True:
     ready = select.select([sock], [], [], 0.1)[0]
@@ -245,8 +385,9 @@ while True:
         if msg['type'] == SEND_VOTE and my_state == CANDIDATE:
             accept_vote(msg)
         if msg['type'] == APPEND_ENTRIES:
-            append_entries(msg)
-
+            recv_append_entries(msg)
+        if msg['type'] == AE_REPLY:
+            recv_append_entries_reply(msg)
 
     clock = time.clock()
     if clock - last_leader_msg > leader_timeout:
@@ -255,6 +396,5 @@ while True:
             conduct_election()
     if my_state == LEADER and clock - last_leader_msg > 0.050:
         # send mass heartbeat
-        heartbeat_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
-        send(heartbeat_msg)
+        send_append_entries()
         last_leader_msg = clock
