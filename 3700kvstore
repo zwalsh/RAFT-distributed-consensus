@@ -43,6 +43,27 @@ pick_random_timeout()
 
 # key-value store for the leader
 store = {}
+# log entries; contains (command for machine, term, client id)
+# also, first index is apparently supposed to be 1
+# command for mahine: ['GET', 123]
+log = [[[1], 1, 1]]
+log = [{
+    "command": {
+        "type": 1,
+        "key": 1,
+        "val": 1,
+    },
+    "term": 1,
+    "client_id": 1
+}]
+# index in the log of the most recent commit
+commit_index = 0
+# index of highest log entry applied to machine
+last_applied = 0
+# for each server, index of the next log entry that you need to send
+next_index = {}
+# for each server, index of highest log entry known to be replicated
+match_index = {}
 
 # Message Types:
 GET = 'get'
@@ -63,12 +84,6 @@ sock.connect(my_id)
 last_leader_msg = time.clock()
 
 
-# add list of log entries
-# add commit index
-#
-
-
-
 def send(msg):
     sock.send(json.dumps(msg))
 
@@ -87,12 +102,25 @@ def get(msg):
             reply['value'] = val
         else:
             reply['type'] = FAIL
+
+        command = {
+            "type": GET,
+            "key": key,
+        }
+        entry = {
+            "command": command,
+            "term": term,
+            "client_id", get_source,
+        }
+        log.append(entry)
+        print log
     else:
         reply['type'] = REDIRECT
     send(reply)
 
-
 def put(msg):
+    global log
+
     put_source = msg['src']
     put_mid = msg.get('MID', None)
     reply = {'src': my_id, 'dst': put_source, 'leader': leader_id}
@@ -103,6 +131,19 @@ def put(msg):
         val = msg['value']
         store[key] = val
         reply['type'] = OK
+
+        command = {
+            "type": PUT,
+            "key": key,
+            "val": val,
+        }
+        entry = {
+            "command": command,
+            "term": term,
+            "client_id", put_source,
+        }
+        log.append(entry)
+        print log
     else:
         reply['type'] = REDIRECT
     send(reply)
@@ -217,4 +258,3 @@ while True:
         heartbeat_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
         send(heartbeat_msg)
         last_leader_msg = clock
-
