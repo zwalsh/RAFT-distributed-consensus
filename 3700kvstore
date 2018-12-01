@@ -63,12 +63,10 @@ sock.connect(my_id)
 last_leader_msg = time.clock()
 
 
-# todo:
-# 1. add a term number to elections (internal state as well)
-# 2. actually implement timeouts (waiting for comm from leader)
-#   - need a heartbeat msg.
-#   - start new election
-# 3. receive a request for vote correctly
+# add list of log entries
+# add commit index
+#
+
 
 
 def send(msg):
