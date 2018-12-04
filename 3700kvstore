@@ -110,10 +110,9 @@ def get(msg):
         entry = {
             "command": command,
             "term": term,
-            "client_id", get_source,
+            "client_id": get_source,
         }
         log.append(entry)
-        print log
     else:
         reply['type'] = REDIRECT
     send(reply)
@@ -140,10 +139,9 @@ def put(msg):
         entry = {
             "command": command,
             "term": term,
-            "client_id", put_source,
+            "client_id": put_source,
         }
         log.append(entry)
-        print log
     else:
         reply['type'] = REDIRECT
     send(reply)
