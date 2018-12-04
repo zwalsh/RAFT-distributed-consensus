@@ -45,8 +45,7 @@ pick_random_timeout()
 store = {}
 # log entries; contains (command for machine, term, client id)
 # also, first index is apparently supposed to be 1
-# command for mahine: ['GET', 123]
-log = [[[1], 1, 1]]
+# command for machine: ['GET', 123]
 log = [{
     "command": {
         "type": 1,
@@ -71,6 +70,7 @@ PUT = 'put'
 REQUEST_VOTE = 'request_vote'
 SEND_VOTE = 'send_vote'
 APPEND_ENTRIES = 'append_entries'
+AE_REPLY = 'ae_reply'
 FAIL = 'fail'
 OK = 'ok'
 REDIRECT = 'redirect'
@@ -150,9 +150,7 @@ def put(msg):
 def send_vote(msg):
     global voted_for, term, my_state, last_leader_msg
 
-    # if recv term < my term, false
-    # if i voted for someone already, false
-    # else update my term and vote for them
+    # set a flag, and then hold onto messages received until new leader elected
 
     received_term = msg['term']
     candidate_id = msg['src']
