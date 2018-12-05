@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import sys, socket, select, time, json, random, math
+from datetime import datetime
 
 # Your ID number
 my_id = sys.argv[1]
@@ -64,6 +65,9 @@ next_index = {}
 # for each server, index of highest log entry known to be replicated
 match_index = {}
 
+# queue of client messages to be redirected when leader is established
+redirect_queue = []
+
 # Message Types:
 GET = 'get'
 PUT = 'put'
@@ -81,7 +85,13 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 # last time a message from the leader was received
-last_leader_msg = time.clock()
+last_leader_msg = datetime.now()
+
+log_file = open(my_id + ".log", 'w')
+
+
+def log_msg(message):
+    log_file.write(message + str(datetime.now()) + "\n")
 
 
 def send(msg):
@@ -113,9 +123,14 @@ def get(msg):
             "client_id": get_source,
         }
         log.append(entry)
+        send(reply)
+        send_append_entries()
+    elif leader_id != 'FFFF':
+        reply['type'] = REDIRECT
+        send(reply)
     else:
         reply['type'] = REDIRECT
-    send(reply)
+        redirect_queue.append(reply)
 
 def put(msg):
     global log
@@ -142,13 +157,18 @@ def put(msg):
             "client_id": put_source,
         }
         log.append(entry)
+        send(reply)
+        send_append_entries()
+    elif leader_id != 'FFFF':
+        reply['type'] = REDIRECT
+        send(reply)
     else:
         reply['type'] = REDIRECT
-    send(reply)
+        redirect_queue.append(reply)
 
 
 def send_vote(msg):
-    global voted_for, term, my_state, last_leader_msg
+    global voted_for, term, my_state, last_leader_msg, leader_id
 
     # set a flag, and then hold onto messages received until new leader elected
 
@@ -167,11 +187,13 @@ def send_vote(msg):
         my_state = FOLLOWER
         voted_for = candidate_id
 
+        leader_id = 'FFFF'
+
         term = received_term
         # must not timeout before election has time to finish
-        last_leader_msg = time.clock()
-        print my_id, 'has voted for', candidate_id, ' in term ', term, time.clock()
-        reply['leader'] = leader_id
+        last_leader_msg = datetime.now()
+        print my_id, 'has voted for', candidate_id, ' in term ', term, datetime.now()
+        reply['leader'] = voted_for
         reply['granted'] = True
         reply['term'] = term
         send(reply)
@@ -188,11 +210,16 @@ def accept_vote(msg):
         print my_id, 'has won the vote - term: ', term
         my_state = LEADER
         leader_id = my_id
-        election_over_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
-        send(election_over_msg)
+        send_append_entries()
+
+def send_append_entries():
+    log_entry = log[len(log) - 1]
+    append_entries_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
+    append_entries_msg['logs'] = [log_entry]
+    send(append_entries_msg)
 
 
-def append_entries(msg):
+def recv_append_entries(msg):
     global leader_id, last_leader_msg, leader_timeout, voted_for, term, my_state
     msg_leader = msg['leader']
     recv_term = msg['term']
@@ -200,19 +227,35 @@ def append_entries(msg):
     if recv_term >= term:
         term = recv_term
         my_state = FOLLOWER
-        last_leader_msg = time.clock()
+        last_leader_msg = datetime.now()
         # later update log here
 
         if msg_leader != leader_id:
-            print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.clock()
+            print my_id, 'has accepted leader:', msg_leader, 'term: ', term, datetime.now()
             leader_id = msg_leader
+            drain_redirect_queue()
             pick_random_timeout()
             voted_for = None
+        append_to_log(msg['logs'])
+
+
+def drain_redirect_queue():
+    global redirect_queue
+    print my_id, 'sending', len(redirect_queue), 'redirects'
+    for msg in redirect_queue:
+        msg['leader'] = leader_id
+        send(msg)
+    redirect_queue = []
+
+
+def append_to_log(logs):
+    global log
+    log += logs
 
 
 def conduct_election():
     global leader_id, my_state, vote_count, term, voted_for
-    print my_id, 'has started an election term: ', term + 1, time.clock()
+    print my_id, 'has started an election term: ', term + 1, datetime.now()
 
     my_state = CANDIDATE
     term += 1
@@ -222,7 +265,7 @@ def conduct_election():
     request_vote_msg = { 'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': REQUEST_VOTE }
     send(request_vote_msg)
 
-
+counter = 0
 while True:
     ready = select.select([sock], [], [], 0.1)[0]
 
@@ -232,6 +275,8 @@ while True:
         if len(msg_raw) == 0: continue
         msg = json.loads(msg_raw)
 
+        if msg['type'] == 'SHUTDOWN':
+            print my_id, len(log)
         if msg['type'] == GET:
             get(msg)
         if msg['type'] == PUT:
@@ -241,16 +286,18 @@ while True:
         if msg['type'] == SEND_VOTE and my_state == CANDIDATE:
             accept_vote(msg)
         if msg['type'] == APPEND_ENTRIES:
-            append_entries(msg)
+            recv_append_entries(msg)
 
-
-    clock = time.clock()
-    if clock - last_leader_msg > leader_timeout:
+    counter += 1
+    # print counter
+    clock = datetime.now()
+    if (clock - last_leader_msg).total_seconds() > leader_timeout:
         # trigger leader elections if a follower
         if my_state == FOLLOWER and voted_for is None:
+            print my_id, 'timeout triggered', clock
             conduct_election()
-    if my_state == LEADER and clock - last_leader_msg > 0.050:
+    if my_state == LEADER and (clock - last_leader_msg).total_seconds() > 0.010:
         # send mass heartbeat
-        heartbeat_msg = {'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES }
-        send(heartbeat_msg)
+        send_append_entries()
+        log_msg('sending heartbeat')
         last_leader_msg = clock
