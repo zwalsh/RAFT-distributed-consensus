@@ -218,8 +218,8 @@ def send_append_entries():
                'leader_commit': commit_index}
         if len(logs_to_send) > 10:
             should_print = True
-            print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
-            print next_index
+#            print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
+#            print next_index
         send(msg)
 
 
@@ -230,8 +230,8 @@ def recv_append_entries_reply(msg):
 
     if succeeded:
         follower_index = msg['current_index']
-        if should_print:
-            print 'Updating next for', follower_id, 'to', follower_index + 1
+        #if should_print:
+        #    print 'Updating next for', follower_id, 'to', follower_index + 1
         next_index[follower_id] = follower_index + 1
         match_index[follower_id] = follower_index
     else:
@@ -252,7 +252,7 @@ def append_new_entries(new_entries, prev_log_idx):
         log_idx = prev_log_idx + i + 1
         if log_idx >= len(log):
             log += new_entries[i:]
-            print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
+            #print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
             break
         log_entry = log[log_idx]
 
@@ -335,7 +335,7 @@ def recv_append_entries(msg):
 
         reply['response'] = True
         reply['current_index'] = len(log) - 1
-        print my_id, 'replying to AE', reply
+        #print my_id, 'replying to AE', reply
         send(reply)
 
         if msg_leader != leader_id:
