@@ -82,8 +82,10 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 # last time a message from the leader was received
-last_leader_msg = time.clock()
+last_leader_msg = time.time()
 
+# list of messages received while the leader is unknown
+redirect_queue = []
 
 
 def send(msg):
@@ -172,8 +174,8 @@ def send_vote(msg):
 
         term = received_term
         # must not timeout before election has time to finish
-        last_leader_msg = time.clock()
-        print my_id, 'has voted for', candidate_id, ' in term ', term, time.clock()
+        last_leader_msg = time.time()
+        print my_id, 'has voted for', candidate_id, ' in term ', term, time.time()
         reply['leader'] = leader_id
         reply['granted'] = True
         reply['term'] = term
@@ -206,7 +208,7 @@ def become_leader():
 should_print = False
 
 def send_append_entries():
-    global next_index, should_print
+    global next_index, should_print, last_leader_msg
     # per every follower, send append-entries method with ones that they don't have
     for server_id in next_index.keys():
         next_log_entry = next_index[server_id]
@@ -221,6 +223,7 @@ def send_append_entries():
 	    print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
             print next_index
         send(msg)
+    last_leader_msg = time.time()
 
 
 def recv_append_entries_reply(msg):
@@ -315,7 +318,7 @@ def recv_append_entries(msg):
         term = recv_term
         reply['term'] = term
         my_state = FOLLOWER
-        last_leader_msg = time.clock()
+        last_leader_msg = time.time()
 
         prev_log_idx = msg['prev_log_idx']
         prev_log_term = msg['prev_log_term']
@@ -346,7 +349,7 @@ def recv_append_entries(msg):
         send(reply)
 
         if msg_leader != leader_id:
-            print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.clock()
+            print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.time()
             leader_id = msg_leader
             pick_random_timeout()
             voted_for = None
@@ -359,7 +362,7 @@ def recv_append_entries(msg):
 
 def conduct_election():
     global leader_id, my_state, vote_count, term, voted_for
-    print my_id, 'has started an election term: ', term + 1, time.clock()
+    print my_id, 'has started an election term: ', term + 1, time.time()
 
     my_state = CANDIDATE
     term += 1
@@ -374,6 +377,7 @@ def conduct_election():
 if my_id == '0000':
     become_leader()
 
+
 while True:
     ready = select.select([sock], [], [], 0.1)[0]
 
@@ -381,7 +385,7 @@ while True:
         msg_raw = sock.recv(32768)
 
         if len(msg_raw) == 0: continue
-        msg = json.loads(msg_raw)
+        msg = json.loads(msg_raw)	
 
         if msg['type'] == GET:
             get(msg)
@@ -396,12 +400,12 @@ while True:
         if msg['type'] == AE_REPLY:
             recv_append_entries_reply(msg)
 
-    clock = time.clock()
+    clock = time.time()
     if clock - last_leader_msg > leader_timeout:
         # trigger leader elections if a follower
         if my_state == FOLLOWER and voted_for is None:
             conduct_election()
-    if my_state == LEADER and clock - last_leader_msg > 0.050:
+    if my_state == LEADER and clock - last_leader_msg > 0.13:
         # send mass heartbeat
         send_append_entries()
         last_leader_msg = clock
