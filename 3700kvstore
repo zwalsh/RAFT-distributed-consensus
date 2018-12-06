@@ -210,7 +210,7 @@ def send_append_entries():
     # per every follower, send append-entries method with ones that they don't have
     for server_id in next_index.keys():
         next_log_entry = next_index[server_id]
-        logs_to_send = log[next_log_entry:next_log_entry + 100]
+        logs_to_send = log[next_log_entry:next_log_entry + 10]
         prev_entry = log[next_log_entry - 1]
 
         msg = {'src': my_id, 'dst': server_id, 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES,
@@ -218,8 +218,8 @@ def send_append_entries():
                'leader_commit': commit_index}
         if len(logs_to_send) > 10:
             should_print = True
-#            print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
-#            print next_index
+	    print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
+            print next_index
         send(msg)
 
 
@@ -247,12 +247,15 @@ def recv_append_entries_reply(msg):
 
 def append_new_entries(new_entries, prev_log_idx):
     global log
+    if len(new_entries) > 5:
+        print my_id, 'received', len(new_entries), 'currently has', len(log), 'prev', prev_log_idx
     for i in range(0, len(new_entries)):
         new_entry = new_entries[i]
         log_idx = prev_log_idx + i + 1
         if log_idx >= len(log):
             log += new_entries[i:]
-            #print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
+	    if len(new_entries) > 5:
+                print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
             break
         log_entry = log[log_idx]
 
@@ -306,10 +309,6 @@ def recv_append_entries(msg):
     msg_leader = msg['leader']
     recv_term = msg['term']
 
-    if should_print:
-        print my_id, 'received AE', msg
-
-
     reply = {'src': my_id, 'dst': msg['src'], 'type': AE_REPLY, 'leader': leader_id }
 
     if recv_term >= term:
@@ -321,6 +320,12 @@ def recv_append_entries(msg):
         prev_log_idx = msg['prev_log_idx']
         prev_log_term = msg['prev_log_term']
 
+        if prev_log_idx >= len(log):
+            print my_id, 'failed because prev entry out of bounds'
+	    reply['response'] = False
+	    send(reply)
+            return
+
         my_prev_log_term = log[prev_log_idx]['term']
 
         if my_prev_log_term != prev_log_term:
@@ -328,6 +333,7 @@ def recv_append_entries(msg):
             print my_prev_log_term, prev_log_term
             reply['response'] = False
             send(reply)
+	    return
 
         new_entries = msg['logs']
         append_new_entries(new_entries, prev_log_idx)
@@ -335,7 +341,8 @@ def recv_append_entries(msg):
 
         reply['response'] = True
         reply['current_index'] = len(log) - 1
-        #print my_id, 'replying to AE', reply
+        if len(new_entries) > 5:
+	    print my_id, 'replying to AE', reply
         send(reply)
 
         if msg_leader != leader_id:
