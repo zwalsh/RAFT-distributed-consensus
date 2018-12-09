@@ -155,27 +155,34 @@ def send_vote(msg):
 
     # if recv term < my term, false
     # if i voted for someone already, false
+    # if their log has everything in my log, vote for them
     # else update my term and vote for them
 
     received_term = msg['term']
     candidate_id = msg['src']
+    last_log = msg['last_log']
+    last_log_term = msg['last_log_term']
 
     reply = {'src': my_id, 'dst': candidate_id, 'type':SEND_VOTE }
+    up_to_date = last_log_term > log[len(log) - 1]['term'] or (last_log_term == log[len(log) - 1]['term'] and last_log >= len(log) - 1)
 
-    if received_term < term or (received_term == term and voted_for is not None):
+    if received_term > term:
+        # must downgrade LEADER -> FOLLOWER if we find out about an election
+        my_state = FOLLOWER
+	term = received_term
+	voted_for = None
+
+    if not up_to_date or received_term < term or (received_term == term and voted_for is not None):
         reply['leader'] = leader_id
         reply['granted'] = False
         reply['term'] = term
         send(reply)
     else:
-        # must downgrade LEADER -> FOLLOWER if we find out about an election
-        my_state = FOLLOWER
         voted_for = candidate_id
 
-        term = received_term
         # must not timeout before election has time to finish
         last_leader_msg = time.time()
-        print my_id, 'has voted for', candidate_id, ' in term ', term, time.time()
+        #print my_id, 'has voted for', candidate_id, ' in term ', term, time.time()
         reply['leader'] = leader_id
         reply['granted'] = True
         reply['term'] = term
@@ -187,9 +194,9 @@ def accept_vote(msg):
 
     if granted:
         vote_count += 1
-        print my_id, 'received vote from', msg['src'], vote_count, ' in term ', term
+        #print my_id, 'received vote from', msg['src'], vote_count, ' in term ', term
     if vote_count >= quorum_size:
-        print my_id, 'has won the vote - term: ', term
+        #print my_id, 'has won the vote - term: ', term
         become_leader()
         send_append_entries()
 
@@ -213,15 +220,18 @@ def send_append_entries():
     for server_id in next_index.keys():
         next_log_entry = next_index[server_id]
         logs_to_send = log[next_log_entry:next_log_entry + 10]
-        prev_entry = log[next_log_entry - 1]
+	if next_log_entry - 1 >= len(log):
+            #print my_id, "log size:", len(log), "next log entry:", next_log_entry
+	    return
 
+        prev_entry = log[next_log_entry - 1]
         msg = {'src': my_id, 'dst': server_id, 'leader': leader_id, 'term': term, 'type': APPEND_ENTRIES,
                'logs': logs_to_send, 'prev_log_idx': next_log_entry - 1, 'prev_log_term': prev_entry['term'],
                'leader_commit': commit_index}
         if len(logs_to_send) > 10:
             should_print = True
-	    print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
-            print next_index
+	    #print 'sending next log entry', next_log_entry, 'num logs', len(logs_to_send), 'total logs', len(log), 'to', server_id
+            #print next_index
         send(msg)
     last_leader_msg = time.time()
 
@@ -233,16 +243,17 @@ def recv_append_entries_reply(msg):
 
     if succeeded:
         follower_index = msg['current_index']
-        #if should_print:
-        #    print 'Updating next for', follower_id, 'to', follower_index + 1
         next_index[follower_id] = follower_index + 1
         match_index[follower_id] = follower_index
     else:
-        print follower_id, 'failed to receive'
+        #print follower_id, 'failed to receive'
         next_index[follower_id] -= 1
 
     sorted_matching_indices = sorted(match_index.values())
     quorum_commit = sorted_matching_indices[2]
+    if quorum_commit >= len(log):
+	#print my_id, "quorum commit:", quorum_commit, "log len:", len(log)
+	return
     commit_entry = log[quorum_commit]
     if commit_entry['term'] == term and quorum_commit > commit_index:
         update_commit_idx(quorum_commit)
@@ -250,22 +261,22 @@ def recv_append_entries_reply(msg):
 
 def append_new_entries(new_entries, prev_log_idx):
     global log
-    if len(new_entries) > 5:
-        print my_id, 'received', len(new_entries), 'currently has', len(log), 'prev', prev_log_idx
+   #if len(new_entries) > 5:
+        #print my_id, 'received', len(new_entries), 'currently has', len(log), 'prev', prev_log_idx
     for i in range(0, len(new_entries)):
         new_entry = new_entries[i]
         log_idx = prev_log_idx + i + 1
         if log_idx >= len(log):
             log += new_entries[i:]
-	    if len(new_entries) > 5:
-                print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
+#	    if len(new_entries) > 5:
+                #print my_id, 'appended', len(new_entries[i:]), 'onto log', len(log), 'from', i, 'in new entries, sent starting with', prev_log_idx + 1
             break
         log_entry = log[log_idx]
 
         if new_entry['term'] != log_entry['term']:
             del log[log_idx:]
             log += new_entries[i:]
-            print my_id, 'deleted all from', log_idx, 'on, appended', len(new_entries), 'onto log', len(log)
+            #print my_id, 'deleted all from', log_idx, 'on, appended', len(new_entries), 'onto log', len(log)
             break
 
 def update_commit_idx(leader_commit):
@@ -324,7 +335,7 @@ def recv_append_entries(msg):
         prev_log_term = msg['prev_log_term']
 
         if prev_log_idx >= len(log):
-            print my_id, 'failed because prev entry out of bounds'
+            #print my_id, 'failed because prev entry out of bounds'
 	    reply['response'] = False
 	    send(reply)
             return
@@ -332,8 +343,8 @@ def recv_append_entries(msg):
         my_prev_log_term = log[prev_log_idx]['term']
 
         if my_prev_log_term != prev_log_term:
-            print my_id, 'failed because wrong previous entry'
-            print my_prev_log_term, prev_log_term
+            #print my_id, 'failed because wrong previous entry'
+            #print my_prev_log_term, prev_log_term
             reply['response'] = False
             send(reply)
 	    return
@@ -344,32 +355,33 @@ def recv_append_entries(msg):
 
         reply['response'] = True
         reply['current_index'] = len(log) - 1
-        if len(new_entries) > 5:
-	    print my_id, 'replying to AE', reply
+#        if len(new_entries) > 5:
+	    #print my_id, 'replying to AE', reply
         send(reply)
 
         if msg_leader != leader_id:
-            print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.time()
+            #print my_id, 'has accepted leader:', msg_leader, 'term: ', term, time.time()
             leader_id = msg_leader
             pick_random_timeout()
             voted_for = None
     else:
         reply['term'] = term
         reply['response'] = False
-        print my_id, 'failed because wrong term'
+        #print my_id, 'failed because wrong term'
         return
 
 
 def conduct_election():
-    global leader_id, my_state, vote_count, term, voted_for
-    print my_id, 'has started an election term: ', term + 1, time.time()
+    global leader_id, my_state, vote_count, term, voted_for, last_leader_msg
 
     my_state = CANDIDATE
     term += 1
     vote_count = 1
     voted_for = my_id
     pick_random_timeout()
-    request_vote_msg = { 'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'type': REQUEST_VOTE }
+    last_leader_msg = time.time()
+    request_vote_msg = { 'src': my_id, 'dst': 'FFFF', 'leader': leader_id, 'term': term, 'last_log': len(log) - 1, 
+                         'last_log_term': log[len(log)-1]['term'], 'type': REQUEST_VOTE }
     send(request_vote_msg)
 
 
@@ -379,7 +391,7 @@ if my_id == '0000':
 
 
 while True:
-    ready = select.select([sock], [], [], 0.1)[0]
+    ready = select.select([sock], [], [], 0.01)[0]
 
     if sock in ready:
         msg_raw = sock.recv(32768)
@@ -403,9 +415,9 @@ while True:
     clock = time.time()
     if clock - last_leader_msg > leader_timeout:
         # trigger leader elections if a follower
-        if my_state == FOLLOWER and voted_for is None:
+        if my_state != LEADER:
             conduct_election()
-    if my_state == LEADER and clock - last_leader_msg > 0.13:
+    if my_state == LEADER and clock - last_leader_msg > 0.1:
         # send mass heartbeat
         send_append_entries()
         last_leader_msg = clock
